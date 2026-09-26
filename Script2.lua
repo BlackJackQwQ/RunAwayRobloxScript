@@ -664,11 +664,11 @@ function teleports:Move(destination, subject, saveLast)
         RunService.Heartbeat:Wait()
     end)
 
-    if camera and camera.Parent then
-        camera.CameraSubject = cameraSubject
-        camera.CameraType = cameraType
-        camera.CFrame = cameraCFrame
-    end
+        if camera and camera.Parent then
+            camera.CameraSubject = cameraSubject
+            camera.CameraType = cameraType
+            camera.CFrame = cameraCFrame
+        end
 
     if not ok then
         self.LastPosition = oldLast
@@ -1122,6 +1122,14 @@ local function isSellable(name)
     return value ~= nil and value > 0
 end
 
+-- Sell All drops loot at the character's feet and it falls straight down, so the
+-- character is held directly over the counter basket for the whole sell. Height is
+-- how far above the basket centre the feet sit: raise it if the basket is deep and
+-- the loot spawns inside the counter geometry instead of on top of it.
+local sellDrop = {
+    Height = 0.35,
+}
+
 local currencyCategories = {
     Cash = true,
     Currency = true,
@@ -1510,6 +1518,7 @@ local function sellAllLoot(onDone)
         local cameraCFrame
         local cameraSubject
         local cameraType
+        local cameraLock
 
         local ok, message = pcall(function()
             local backpack = player:FindFirstChildOfClass("Backpack")
@@ -1567,23 +1576,55 @@ local function sellAllLoot(onDone)
                 camera.CFrame = cameraCFrame
             end
 
-            local direction = bell.Position - volume.Position
-            direction = Vector3.new(direction.X, 0, direction.Z)
-            direction = direction.Magnitude > 0.1 and direction.Unit or -volume.CFrame.LookVector
-
-            local position = volume.Position + direction * 3.8
-            position = Vector3.new(position.X, volume.Position.Y + 0.35, position.Z)
+            -- Loot is dropped at the character's feet and falls straight down, so the
+            -- only placement that cannot miss is directly over the basket. The old
+            -- 3.8 stud customer spot left the drop on the floor beside the counter,
+            -- which is why it went unsold whenever the player was facing another way.
+            local basket = volume.Position
+            local dropHeight = math.max(tonumber(sellDrop.Height) or 0.35, 0.05)
+            local dropCFrame = CFrame.new(basket.X, basket.Y + dropHeight, basket.Z)
+            local aimOnly = CFrame.lookAt(dropCFrame.Position, basket) - dropCFrame.Position
 
             humanoid:UnequipTools()
-            character:PivotTo(CFrame.lookAt(position, Vector3.new(volume.Position.X, position.Y, volume.Position.Z)))
+            character:PivotTo(dropCFrame)
             root.AssemblyLinearVelocity = Vector3.zero
             root.AssemblyAngularVelocity = Vector3.zero
+
+            if camera then
+                camera.CameraType = Enum.CameraType.Scriptable
+                camera.CFrame = CFrame.new(cameraCFrame.Position) * aimOnly
+            end
+
+            -- Gravity and the network owner both pull the character off the hold, and
+            -- the default camera module rewrites CFrame every frame even in Scriptable
+            -- mode, so the drop position is pinned for the entire sell rather than set
+            -- once and left to drift.
+            cameraLock = RunService.RenderStepped:Connect(function()
+                if root and root.Parent == character then
+                    character:PivotTo(dropCFrame)
+                    root.AssemblyLinearVelocity = Vector3.zero
+                    root.AssemblyAngularVelocity = Vector3.zero
+                end
+
+                if camera and camera.Parent then
+                    camera.CFrame = CFrame.new(camera.CFrame.Position) * aimOnly
+                end
+            end)
+
             task.wait(0.25)
 
             local cashBefore = getCashAmount()
             local index = 1
 
             while index <= #tools and not library.Unloaded do
+                -- re-seat on the basket immediately before the batch drops, in case
+                -- something moved the character between the pin and this point
+                if root and root.Parent == character then
+                    character:PivotTo(dropCFrame)
+                    root.AssemblyLinearVelocity = Vector3.zero
+                    root.AssemblyAngularVelocity = Vector3.zero
+                end
+
                 local deposited = 0
                 local batchValue = 0
 
@@ -1717,6 +1758,11 @@ local function sellAllLoot(onDone)
             character:PivotTo(startPivot)
             root.AssemblyLinearVelocity = Vector3.zero
             root.AssemblyAngularVelocity = Vector3.zero
+        end
+
+        if cameraLock then
+            cameraLock:Disconnect()
+            cameraLock = nil
         end
 
         if camera and camera.Parent then
@@ -2324,7 +2370,7 @@ print("[Script2] window created")
 -- Paste a public URL for THIS script below to enable it.
 -- "--" disables re-queue cleanly and reports
 -- "Teleport loader is not configured".
-local AUTO_FARM_LOADER = "https://raw.githubusercontent.com/BlackJackQwQ/RunAwayRobloxScript/refs/heads/main/Script2.lua?cb=23"
+local AUTO_FARM_LOADER = "https://raw.githubusercontent.com/BlackJackQwQ/RunAwayRobloxScript/refs/heads/main/Script2.lua?cb=26"
 
 local farm = {
     Version = 1,
@@ -2708,6 +2754,46 @@ function farm:GetClosestPawn(origin, maxDistance)
     end
 
     return best, bestDistance
+end
+
+-- PivotTo never turns the camera: Roblox keeps its own orientation, so the view
+-- looks identical before and after a teleport unless the camera CFrame is set
+-- directly. The hold re-applies it because the default camera script restores
+-- its orientation on the very next frame.
+function farm:LookAlong(rotation, holdTime)
+    local camera = workspace.CurrentCamera
+
+    if not camera or not rotation then
+        return false
+    end
+
+    local deadline = os.clock() + (tonumber(holdTime) or 0.4)
+
+    while os.clock() < deadline do
+        camera.CFrame = CFrame.new(camera.CFrame.Position) * rotation
+        task.wait()
+    end
+
+    return true
+end
+
+function farm:LookToward(target, holdTime)
+    local camera = workspace.CurrentCamera
+    local origin = camera and camera.CFrame.Position or (player.Character and player.Character:GetPivot().Position)
+
+    if not origin or not target then
+        return false
+    end
+
+    local delta = target - origin
+
+    if delta.Magnitude < 0.5 then
+        return false
+    end
+
+    local look = CFrame.lookAt(origin, target)
+
+    return self:LookAlong(look - look.Position, holdTime)
 end
 
 function farm:FaceClosestPawn(maxDistance)
@@ -3188,6 +3274,10 @@ function farm:RunPawnSweep(token)
         -- is being fought while the character is in mid travel.
         self:SetKillAura(false)
 
+        -- turn the camera toward the pawn shop before leaving, so the view is
+        -- already pointing at the shop when the character lands there
+        self:LookToward(shop.Anchor, 0.3)
+
         -- Teleport first, then confirm. A PawnCounter only exists client side once
         -- its area has streamed in, so the tag cannot be read before we arrive.
         if not teleports:Move(CFrame.new(shop.Anchor), character) then
@@ -3222,6 +3312,17 @@ function farm:RunPawnSweep(token)
 
             -- the aura stays off unless we really ended up on the pawn facing its way
             auraReady = self:AlignToPawn(pawn, character) == true
+
+            if auraReady then
+                local body = pawn:FindFirstChild("HumanoidRootPart") or pawn:FindFirstChild("Head")
+
+                if body then
+                    local bodyFrame = body.CFrame
+
+                    -- point the camera the same way the pawn is looking
+                    self:LookAlong(bodyFrame - bodyFrame.Position, 0.5)
+                end
+            end
         else
             -- no pawn here yet: give the area a moment before running the aura anyway
             task.wait(3)
