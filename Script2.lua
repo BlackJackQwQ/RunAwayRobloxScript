@@ -2324,7 +2324,7 @@ print("[Script2] window created")
 -- Paste a public URL for THIS script below to enable it.
 -- "--" disables re-queue cleanly and reports
 -- "Teleport loader is not configured".
-local AUTO_FARM_LOADER = "https://raw.githubusercontent.com/BlackJackQwQ/RunAwayRobloxScript/refs/heads/main/Script2.lua?cb=15"
+local AUTO_FARM_LOADER = "https://raw.githubusercontent.com/BlackJackQwQ/RunAwayRobloxScript/refs/heads/main/Script2.lua?cb=20"
 
 local farm = {
     Version = 1,
@@ -2407,8 +2407,10 @@ local farm = {
         SellRounds = 3,
         ShopRadius = 160,
         ShopBudget = 45,
+        ShopAttempts = 3,
         SweepTimeout = 900,
         SafeGateWait = true,
+        AutoStart = true,
         AutoReplay = true,
         ForceAssist = false,
     },
@@ -2733,6 +2735,29 @@ function farm:FaceClosestPawn(maxDistance)
     return npc
 end
 
+function farm:StandOnPawn(pawn, character)
+    character = character or player.Character
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+
+    if not character or not root or not pawn or not pawn.Parent then
+        return false
+    end
+
+    -- stand on the pawn's head so the aura and the loot prompt are both in range
+    local target = pawn:FindFirstChild("Head") or pawn:FindFirstChild("HumanoidRootPart") or pawn
+
+    if not target or not target.Parent then
+        return false
+    end
+
+    local standing = target.CFrame * CFrame.new(0, 0, -2.5)
+    character:PivotTo(standing)
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
+
+    return true
+end
+
 function farm:GetCharacterReady()
     local character = player.Character
     local humanoid = character and character:FindFirstChildOfClass("Humanoid")
@@ -2779,16 +2804,16 @@ function farm:WaitShopLoot(token, shop)
             continue
         end
 
-        if os.clock() >= shopDeadline then
-            self.LastError = "Shop budget spent at " .. shop.Name
-            return true
-        end
+      if os.clock() >= shopDeadline then
+          self.LastError = "Shop budget spent at " .. shop.Name
+          return "retry"
+      end
 
-        rounds += 1
+      rounds += 1
 
-        if rounds > shopRounds then
-            return true
-        end
+      if rounds > shopRounds then
+          return "retry"
+      end
 
         -- let kill aura thin the pawns out before looting
         local settleUntil = os.clock() + math.max(0, settle)
@@ -2803,11 +2828,11 @@ function farm:WaitShopLoot(token, shop)
             task.wait(0.1)
         end
 
-        if not self.Running or self.Token ~= token or library.Unloaded then
-            return true
-        end
+      if not self.Running or self.Token ~= token or library.Unloaded then
+          return "abort"
+      end
 
-        self:SetPhase("Looting", shop.Name)
+      self:SetPhase("Looting", shop.Name)
 
         local lootDone, lootResult = false, nil
 
@@ -2827,11 +2852,11 @@ function farm:WaitShopLoot(token, shop)
             task.wait(0.1)
         end
 
-        if not self.Running or self.Token ~= token or library.Unloaded then
-            return true
-        end
+      if not self.Running or self.Token ~= token or library.Unloaded then
+          return "abort"
+      end
 
-        if not lootResult or lootResult.ok ~= true then
+      if not lootResult or lootResult.ok ~= true then
             self.Stats.Retries += 1
             self.LastError = "Loot failed: " .. tostring(lootResult and lootResult.reason or "no result")
             self:SetPhase("Retrying", self.LastError)
@@ -2843,19 +2868,19 @@ function farm:WaitShopLoot(token, shop)
 
         self.Stats.Looted += gained
 
-        -- nothing left here: move on to the next shop
-        if lootResult.nothing then
-            return true
-        end
+      -- only a real "nothing" report lets the sweep move on to the next shop
+      if lootResult.nothing then
+          return "empty"
+      end
 
-        -- gear was visible but none of it could be taken twice running: call it spent
-        if gained <= 0 then
-            zeroYield += 1
+      -- gear was visible but none of it could be taken twice running: call it spent
+      if gained <= 0 then
+          zeroYield += 1
 
-            if zeroYield >= 2 then
-                self.LastError = "No loot could be taken at " .. shop.Name
-                return true
-            end
+          if zeroYield >= 2 then
+              self.LastError = "No loot could be taken at " .. shop.Name
+              return "retry"
+          end
         else
             zeroYield = 0
         end
@@ -2892,7 +2917,7 @@ function farm:WaitShopLoot(token, shop)
             end
 
             if not self.Running or self.Token ~= token or library.Unloaded then
-                return true
+                return "abort"
             end
 
             if not sellResult or sellResult.ok ~= true then
@@ -2917,12 +2942,12 @@ function farm:WaitShopLoot(token, shop)
     -- reported "nothing to loot" and loot could be left on the ground.
     for confirm = 1, 2 do
         if not self.Running or self.Token ~= token or library.Unloaded then
-            return true
+            return "abort"
         end
 
         if os.clock() >= shopDeadline then
             self.LastError = "Shop budget spent at " .. shop.Name
-            return true
+            return "retry"
         end
 
         self:SetPhase("Looting", shop.Name)
@@ -2946,14 +2971,14 @@ function farm:WaitShopLoot(token, shop)
         end
 
         if not confirmResult or confirmResult.ok ~= true then
-            return true
+            return "retry"
         end
 
         self.Stats.Looted += tonumber(confirmResult.looted) or 0
 
         -- the shop is genuinely empty, so the sweep can move on
         if confirmResult.nothing or (tonumber(confirmResult.looted) or 0) <= 0 then
-            return true
+            return "empty"
         end
 
         -- something was still on the ground: sell it off, then confirm once more
@@ -3000,7 +3025,8 @@ function farm:WaitShopLoot(token, shop)
         end
     end
 
-    return true
+    -- the confirming passes never reported "nothing": treat as not finished
+    return "retry"
 end
 
 function farm:RunPawnSweep(token)
@@ -3035,10 +3061,33 @@ function farm:RunPawnSweep(token)
     local farms = 0
     local skipped = 0
     local processed = {}
+    local attempts = {}
+    local maxAttempts = tonumber(self.Config.ShopAttempts) or 3
     local shopRadius = tonumber(self.Config.ShopRadius) or 160
     local sweepTimeout = tonumber(self.Config.SweepTimeout) or 900
     local overallDeadline = os.clock() + math.max(60, sweepTimeout)
     local lastProgressAt = os.clock()
+
+    -- A shop is only ever left behind once Loot All has reported that there is
+    -- nothing left. Anything else keeps the sweep on the same shop.
+    local function shouldRetry(shop, reason)
+        local count = (attempts[shop.Instance] or 0) + 1
+        attempts[shop.Instance] = count
+
+        if count >= maxAttempts then
+            self.LastError = string.format("Gave up at %s (%s)", shop.Name, reason)
+            self.Stats.Shops += 1
+            skipped += 1
+            processed[shop.Instance] = true
+            return false
+        end
+
+        self.LastError = string.format("%s at %s - retry %d/%d", reason, shop.Name, count, maxAttempts)
+        self:SetPhase("Retrying", self.LastError)
+        lastProgressAt = os.clock()
+
+        return true
+    end
 
     while self.Running and self.Token == token and not library.Unloaded do
         if self.TeleportRecovering then
@@ -3072,11 +3121,10 @@ function farm:RunPawnSweep(token)
             break
         end
 
-        if processed[shop.Order] then
+        if processed[shop.Instance] then
             continue
         end
 
-        processed[shop.Order] = true
         lastProgressAt = os.clock()
         self.SweepIndex = position
         self:SetPhase("Shops", string.format("Shop %d/%d - %s", position, total, shop.Name))
@@ -3084,23 +3132,33 @@ function farm:RunPawnSweep(token)
           local ready, character = self:GetCharacterReady()
 
           if not ready then
-              self.LastError = "Character is not ready"
-              skipped += 1
+              if shouldRetry(shop, "Character is not ready") then
+                  position -= 1
+              end
+
               continue
           end
 
           if not shop.Anchor then
-              self.LastError = "No anchor for " .. shop.Name
-              skipped += 1
+              if shouldRetry(shop, "No anchor") then
+                  position -= 1
+              end
+
               continue
           end
 
 
+        -- Kill aura is always off before leaving for the next pawn shop, so nothing
+        -- is being fought while the character is in mid travel.
+        self:SetKillAura(false)
+
         -- Teleport first, then confirm. A PawnCounter only exists client side once
         -- its area has streamed in, so the tag cannot be read before we arrive.
         if not teleports:Move(CFrame.new(shop.Anchor), character) then
-            self.LastError = "Could not reach " .. shop.Name
-            skipped += 1
+            if shouldRetry(shop, "Could not reach") then
+                position -= 1
+            end
+
             continue
         end
 
@@ -3109,8 +3167,6 @@ function farm:RunPawnSweep(token)
         -- then always loot and sell.
         local counter = self:WaitForPawnCounter(shop.Anchor, shopRadius, 4, shop.Name)
 
-        self.Stats.Shops += 1
-        farms += 1
         self:SetPhase("Shops", string.format(
             "Shop %d/%d - %s%s",
             position,
@@ -3119,21 +3175,37 @@ function farm:RunPawnSweep(token)
             counter and "" or " (no counter tag)"
         ))
 
-        -- the pawn NPC only drives facing and the kill aura, so it is optional
+        -- the pawn NPC only drives standing position and the kill aura, so it is optional
         local pawn = self:WaitForPawn(shop.Anchor, shopRadius, 4, shop.Name)
 
         if pawn then
-            self:SetKillAura(false)
-            task.wait(0.2)
+            -- turn to face the pawn first, then hop onto its head
             self:FaceClosestPawn(shopRadius)
-            self:SetKillAura(true, true)
+            task.wait(0.2)
+            self:StandOnPawn(pawn, character)
         end
 
-        self:WaitShopLoot(token, shop)
+        self:SetKillAura(true, true)
 
-        if not self.Running or self.Token ~= token or library.Unloaded then
+        local outcome = self:WaitShopLoot(token, shop)
+
+        if outcome == "abort" or not self.Running or self.Token ~= token or library.Unloaded then
             break
         end
+
+        if outcome ~= "empty" then
+            -- Loot All never said there was nothing here, so stay on this shop
+            if shouldRetry(shop, "Loot All did not report empty") then
+                position -= 1
+            end
+
+            continue
+        end
+
+        processed[shop.Instance] = true
+        self.Stats.Shops += 1
+        farms += 1
+        lastProgressAt = os.clock()
     end
 
     self.SweepDone = true
@@ -3189,6 +3261,15 @@ function farm:IsSafeGateWaitEnabled()
     return self.Config.SafeGateWait == true
 end
 
+-- Auto executor runs the script on every server, so Auto Farm starts itself.
+function farm:IsAutoStartEnabled()
+    if toggles.RunawaysAutoFarmAutoStart then
+        return toggles.RunawaysAutoFarmAutoStart.Value == true
+    end
+
+    return self.Config.AutoStart == true
+end
+
 function farm:GetQueueFunction()
     if type(queue_on_teleport) == "function" then
         return queue_on_teleport
@@ -3220,7 +3301,8 @@ end
 function farm:HasTeleportLoader()
     local loader = self:GetTeleportLoader()
 
-    return loader ~= "" and not loader:match("^%-%-")
+    -- must be a real URL: anything else cannot be fetched on the new server
+    return loader:match("^https?://%S+") ~= nil
 end
 
 function farm:GetTeleportQueueError(expectedPlaceId)
@@ -3595,9 +3677,13 @@ function farm:ApplyPreferences(snapshot)
             self.Config.AutoReplay = true
         end
 
-        if type(snapshot.Config.ForceAssist) == "boolean" then
-            self.Config.ForceAssist = snapshot.Config.ForceAssist
-        end
+          if type(snapshot.Config.AutoStart) == "boolean" then
+              self.Config.AutoStart = snapshot.Config.AutoStart
+          end
+
+          if type(snapshot.Config.ForceAssist) == "boolean" then
+              self.Config.ForceAssist = snapshot.Config.ForceAssist
+          end
     end
 
     return true
@@ -3839,6 +3925,10 @@ function farm:ApplyStoredOptions()
         toggles.RunawaysAutoFarmAutoReplay:SetValue(self.Config.AutoReplay)
     end
 
+    if toggles.RunawaysAutoFarmAutoStart then
+        toggles.RunawaysAutoFarmAutoStart:SetValue(self.Config.AutoStart)
+    end
+
     if toggles.RunawaysAutoFarmForceAssist then
         toggles.RunawaysAutoFarmForceAssist:SetValue(self.Config.ForceAssist)
     end
@@ -3888,38 +3978,71 @@ function farm:QueueTeleport(reason, expectedPlaceId)
 
     local snapshot = self.LastSnapshot
 
+    -- The queued payload has to fetch and run the loader itself. Splicing the raw
+    -- URL into the function body only evaluates a string literal and does nothing,
+    -- which is why the script never came back on the new server.
+    local loaderSnippet = string.format(
+        "local src\n"
+            .. "pcall(function() src = game:HttpGet(%q) end)\n"
+            .. "if type(src) ~= 'string' or src == '' then\n"
+            .. "local ge = getgenv and getgenv() or _G\n"
+            .. "local cands = {}\n"
+            .. "local function add(f) if type(f) == 'function' then cands[#cands + 1] = f end end\n"
+            .. "add(request)\n"
+            .. "add(http_request)\n"
+            .. "if type(ge) == 'table' then add(ge.request) add(ge.http_request) end\n"
+            .. "if type(ge.syn) == 'table' then add(ge.syn.request) end\n"
+            .. "if type(ge.fluxus) == 'table' then add(ge.fluxus.request) end\n"
+            .. "for i = 1, #cands do\n"
+            .. "local body\n"
+            .. "pcall(function() body = cands[i]({ Url = %q, Method = 'GET' }) end)\n"
+            .. "if type(body) == 'string' and body ~= '' then src = body break end\n"
+            .. "end\n"
+            .. "end\n"
+            .. "if type(src) == 'string' and src ~= '' then\n"
+            .. "local chunk, fn = pcall(loadstring, src)\n"
+            .. "if chunk and type(fn) == 'function' then fn() end\n"
+            .. "end\n",
+        loader,
+        loader
+    )
+
+    -- Loading is gated on the place only. The transition token decides whether the
+    -- previous farm session is resumed, never whether the script loads at all.
     local payload = string.format(
         "if not game:IsLoaded() then game.Loaded:Wait() end\n"
             .. "if game.PlaceId == %d or game.PlaceId == %d then\n"
             .. "local p = game:GetService(%q)\n"
             .. "while not p.LocalPlayer do task.wait() end\n"
             .. "local t = game:GetService(%q)\n"
-            .. "local v = nil\n"
-            .. "pcall(function() v = t:GetTeleportSetting(%q) end)\n"
-            .. "if t:GetTeleportSetting(%q) ~= false and tostring(v or '') == %q then\n"
             .. "local e = getgenv and getgenv() or _G\n"
+            .. "local matched = false\n"
+            .. "pcall(function() matched = tostring(t:GetTeleportSetting(%q) or '') == %q end)\n"
+            .. "if matched then\n"
+            .. "e.RunawaysAutoFarmTransitionToken = %q\n"
+            .. "e.RunawaysAutoFarmQueuedState = %q\n"
+            .. "e.RunawaysAutoFarmQueueFailed = nil\n"
+            .. "else\n"
+            .. "e.RunawaysAutoFarmTransitionToken = nil\n"
+            .. "e.RunawaysAutoFarmQueuedState = nil\n"
+            .. "end\n"
             .. "if e.RunawaysAutoFarmQueueExecution ~= %q then\n"
             .. "e.RunawaysAutoFarmQueueExecution = %q\n"
             .. "e.RunawaysAutoFarmQueueLoading = %q\n"
             .. "local s = false\n"
             .. "for i = 1, 3 do\n"
-            .. "e.RunawaysAutoFarmTransitionToken = %q\n"
-            .. "e.RunawaysAutoFarmQueuedState = %q\n"
+            .. "local before = e.RunawaysScript2\n"
             .. "local o = pcall(function()\n"
             .. "%s\n"
             .. "end)\n"
+            .. "if e.RunawaysScript2 ~= before then s = true break end\n"
             .. "if o then s = true break end\n"
             .. "task.wait(i)\n"
             .. "end\n"
             .. "if e.RunawaysAutoFarmQueueLoading == %q then e.RunawaysAutoFarmQueueLoading = nil end\n"
-            .. "if not s and e.RunawaysAutoFarmQueueExecution == %q then\n"
+            .. "if not s then\n"
             .. "e.RunawaysAutoFarmQueueExecution = nil\n"
-            .. "if e.RunawaysScriptLoading == coroutine.running() then\n"
-            .. "e.RunawaysScriptLoading = nil\n"
-            .. "e.RunawaysScriptLoadingAt = nil\n"
-            .. "e.RunawaysScriptLoadingToken = nil\n"
-            .. "end\n"
-            .. "end\n"
+            .. "e.RunawaysAutoFarmQueueFailed = true\n"
             .. "end\n"
             .. "end\n"
             .. "end",
@@ -3928,15 +4051,13 @@ function farm:QueueTeleport(reason, expectedPlaceId)
         "Players",
         "TeleportService",
         self.TransitionKey,
-        self.EnabledKey,
-        transitionToken,
-        transitionToken,
-        transitionToken,
         transitionToken,
         transitionToken,
         snapshot,
-        loader,
         transitionToken,
+        transitionToken,
+        transitionToken,
+        loaderSnippet,
         transitionToken
     )
     local ok, message = pcall(queueFunction, payload)
@@ -3949,6 +4070,17 @@ function farm:QueueTeleport(reason, expectedPlaceId)
         self:Persist()
         self:UpdateUI()
         return false, tostring(message)
+    end
+
+    -- prove the payload is real code and not an inert string before claiming the
+    -- reload is armed, so a broken queue is visible here and not on the next server
+    local body = payload:match("HttpGet%(([^)]*)%)")
+    local armed = body ~= nil and payload:find("loadstring", 1, true) ~= nil
+
+    if not armed then
+        self.QueueStatus = "Loader payload invalid"
+        self:UpdateUI()
+        return false, "Loader payload invalid"
     end
 
     self.QueueJob = game.JobId
@@ -6125,6 +6257,17 @@ function farm:Start()
         self:UpdateUI()
     end
 
+    -- the queued payload sets this when it could not fetch or run the script, so
+    -- a broken reload is reported here instead of failing silently
+    local queueEnv = getgenv and getgenv() or _G
+
+    if queueEnv.RunawaysAutoFarmQueueFailed == true then
+        self.QueueStatus = "Reload failed on this server"
+
+        notify("Auto Farm: the queued reload could not run the script here.", 10)
+        self:UpdateUI()
+    end
+
     task.spawn(function()
         local token = self.Token
 
@@ -6420,6 +6563,15 @@ autoFarmBox:AddToggle("RunawaysAutoFarm", {
     end,
 })
 
+farmBox:AddToggle("RunawaysAutoFarmAutoStart", {
+    Text = "Auto Start on script load",
+    Default = farm.Config.AutoStart,
+    Callback = function(value)
+        farm.Config.AutoStart = value
+        farm:Persist()
+    end,
+})
+
 farmBox:AddToggle("RunawaysAutoFarmSafeGateWait", {
     Text = "Safe Gate Wait",
     Default = farm.Config.SafeGateWait,
@@ -6685,7 +6837,7 @@ farm.StateReady = true
 farm:ApplyStoredOptions()
 farm:UpdateUI()
 
-if farm.ResumeRequested or (toggles.RunawaysAutoFarm and toggles.RunawaysAutoFarm.Value == true) then
+if farm.ResumeRequested or (toggles.RunawaysAutoFarm and toggles.RunawaysAutoFarm.Value == true) or farm:IsAutoStartEnabled() then
     farm.ResumeRequested = true
     farm:Start()
 
