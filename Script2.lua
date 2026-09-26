@@ -2324,7 +2324,7 @@ print("[Script2] window created")
 -- Paste a public URL for THIS script below to enable it.
 -- "--" disables re-queue cleanly and reports
 -- "Teleport loader is not configured".
-local AUTO_FARM_LOADER = "https://raw.githubusercontent.com/BlackJackQwQ/RunAwayRobloxScript/refs/heads/main/Script2.lua?cb=1"
+local AUTO_FARM_LOADER = "https://raw.githubusercontent.com/BlackJackQwQ/RunAwayRobloxScript/refs/heads/main/Script2.lua?cb=2"
 
 local farm = {
     Version = 1,
@@ -2399,10 +2399,11 @@ local farm = {
         LobbyDelay = 8,
         GateTimeout = 165,
         RetryDelay = 6,
-        SettleDelay = 3,
-        ShopRounds = 12,
-        SellRounds = 8,
+        SettleDelay = 1.5,
+        ShopRounds = 4,
+        SellRounds = 3,
         ShopRadius = 160,
+        ShopBudget = 45,
         SweepTimeout = 900,
         SafeGateWait = true,
         AutoReplay = false,
@@ -2611,13 +2612,21 @@ end
 function farm:WaitShopLoot(token, shop)
     local rounds = 0
     local settle = tonumber(self.Config.SettleDelay) or 3
-    local shopRounds = tonumber(self.Config.ShopRounds) or 12
-    local sellRounds = tonumber(self.Config.SellRounds) or 8
+    local shopRounds = tonumber(self.Config.ShopRounds) or 4
+    local sellRounds = tonumber(self.Config.SellRounds) or 3
+    local budget = tonumber(self.Config.ShopBudget) or 45
+    local zeroYield = 0
+    local shopDeadline = os.clock() + math.max(10, budget)
 
     while self.Running and self.Token == token and not library.Unloaded do
         if self.TeleportRecovering then
             task.wait(0.25)
             continue
+        end
+
+        if os.clock() >= shopDeadline then
+            self.LastError = "Shop budget spent at " .. shop.Name
+            return true
         end
 
         rounds += 1
@@ -2675,11 +2684,25 @@ function farm:WaitShopLoot(token, shop)
             continue
         end
 
-        self.Stats.Looted += tonumber(lootResult.looted) or 0
+        local gained = tonumber(lootResult.looted) or 0
+
+        self.Stats.Looted += gained
 
         -- nothing left here: move on to the next shop
         if lootResult.nothing then
             return true
+        end
+
+        -- gear was visible but none of it could be taken twice running: call it spent
+        if gained <= 0 then
+            zeroYield += 1
+
+            if zeroYield >= 2 then
+                self.LastError = "No loot could be taken at " .. shop.Name
+                return true
+            end
+        else
+            zeroYield = 0
         end
 
         -- sell until the inventory reports nothing left to sell
@@ -2743,6 +2766,27 @@ function farm:RunPawnSweep(token)
 
     local entries = self:GetPawnShopEntries()
     local total = #entries
+
+    if total == 0 then
+        self.LastError = "No pawn shop buildings were found"
+        self:SetPhase("Shops", "No pawn shops found")
+        notify("Auto Farm: no pawn shop buildings were found.", 8)
+    else
+        local sample = {}
+
+        for i = 1, math.min(3, total) do
+            sample[#sample + 1] = entries[i].Name
+        end
+
+        self:SetPhase("Shops", string.format(
+            "Found %d pawn shop(s): %s%s",
+            total,
+            table.concat(sample, ", "),
+            total > 3 and ", ..." or ""
+        ))
+        notify(string.format("Auto Farm: found %d pawn shop(s).", total), 6)
+    end
+
     local index = 0
     local visited = 0
     local shopRadius = tonumber(self.Config.ShopRadius) or 160
@@ -5623,7 +5667,11 @@ function farm:Run(token)
 
             if context == "Game" then
                 if not self.SweepDone then
-                    return self:RunPawnSweep(token)
+                    local swept, sweepMessage = self:RunPawnSweep(token)
+
+                    if not swept then
+                        return false, sweepMessage
+                    end
                 end
 
                 return self:RunGame(token)
