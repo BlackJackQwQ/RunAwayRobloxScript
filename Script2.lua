@@ -2324,7 +2324,7 @@ print("[Script2] window created")
 -- Paste a public URL for THIS script below to enable it.
 -- "--" disables re-queue cleanly and reports
 -- "Teleport loader is not configured".
-local AUTO_FARM_LOADER = "https://raw.githubusercontent.com/BlackJackQwQ/RunAwayRobloxScript/refs/heads/main/Script2.lua?cb=13"
+local AUTO_FARM_LOADER = "https://raw.githubusercontent.com/BlackJackQwQ/RunAwayRobloxScript/refs/heads/main/Script2.lua?cb=15"
 
 local farm = {
     Version = 1,
@@ -2494,6 +2494,74 @@ function farm:SetKillAura(enabled, useMaxRange)
     end
 end
 
+function farm:FindPawnCounterIn(building)
+    for _, descendant in ipairs(building:GetDescendants()) do
+        local name = string.lower(descendant.Name or "")
+
+        if name == "pawncounter" or name == "callbell" then
+            return descendant
+        end
+
+        if descendant:IsA("BasePart") and hasTag(descendant, "PawnCounter") then
+            return descendant
+        end
+    end
+
+    return nil
+end
+
+function farm:GetBuildingAnchor(building, counter)
+    -- The counter is the best anchor for a pawn shop: that is where loot is taken
+    -- and sold. Fall back through the teleport surface, the model pivot and the
+    -- bounding box so a shop is never dropped just because it has no "road" part.
+    local counterPosition
+
+    if counter then
+        local reference = counter:FindFirstChild("Volume", true)
+
+        if not reference and counter:IsA("BasePart") then
+            reference = counter
+        end
+
+        if reference then
+            if reference:IsA("Model") then
+                local ok, pivot = pcall(reference.GetPivot, reference)
+
+                counterPosition = ok and pivot and pivot.Position or nil
+            elseif reference:IsA("BasePart") then
+                counterPosition = reference.Position
+            end
+        end
+    end
+
+    local surface = teleports:GetBuildingSurface(building)
+    local fallback
+
+    if not counterPosition then
+        local ok, pivot = pcall(building.GetPivot, building)
+
+        if ok and pivot then
+            fallback = pivot.Position
+        end
+    end
+
+    if not counterPosition and not fallback then
+        local ok, cf = pcall(building.GetBoundingBox, building)
+
+        if ok and cf then
+            fallback = cf.Position
+        end
+    end
+
+    local anchor = counterPosition or (surface and surface.Position) or fallback
+
+    if not anchor then
+        return nil, surface
+    end
+
+    return anchor + Vector3.new(0, 3, 0), surface
+end
+
 function farm:GetPawnShopEntries()
     local entries = {}
     local map = workspace:FindFirstChild("Map")
@@ -2503,31 +2571,37 @@ function farm:GetPawnShopEntries()
         return entries
     end
 
-    -- The building list the teleport system already builds contains every pawn
-    -- shop regardless of distance, alongside whatever ordinary buildings are
-    -- currently loaded. Take the pawn shops straight out of that data instead of
-    -- walking every building to find out what it is.
+    -- A pawn shop is identified by the counter inside it (PawnCounter / CallBell),
+    -- not by the building's name. Name keywords are still accepted as a fallback,
+    -- and the "sign" exclusion is dropped because it can only discard real shops.
     local generated = 0
 
     for _, building in buildings:GetChildren() do
         generated += 1
 
-        if building:IsA("Model")
-            and not building.Name:lower():find("sign", 1, true)
-            and isPawnNamed(building.Name)
-        then
-            local surface = teleports:GetBuildingSurface(building)
+        if building:IsA("Model") then
+            local counter = self:FindPawnCounterIn(building)
+            local named = isPawnNamed(building.Name)
 
-            if surface then
+            if counter or named then
+                local anchor, surface = self:GetBuildingAnchor(building, counter)
+
+                -- a shop is kept even without an anchor: the sweep reports it as
+                -- unresolvable instead of quietly dropping it from the count
+                if not anchor then
+                    self.LastError = "No anchor for " .. building.Name
+                end
+
                 local attributeId = tonumber(building:GetAttribute("BuildingId"))
 
                 entries[#entries + 1] = {
                     Instance = building,
+                    Counter = counter,
                     Surface = surface,
-                    Anchor = surface.Position + Vector3.new(0, 3, 0),
+                    Anchor = anchor,
                     Order = attributeId or 1000000000 + generated,
                     Name = building.Name,
-                    Named = true,
+                    Named = named,
                 }
             end
         end
@@ -2942,8 +3016,19 @@ function farm:RunPawnSweep(token)
         self:SetPhase("Shops", "No pawn shop found")
         notify("Auto Farm: no pawn shop was found in the building list.", 8)
     else
+        local names = {}
+
+        for index = 1, math.min(6, total) do
+            names[#names + 1] = queue[index].Name
+        end
+
         self:SetPhase("Shops", string.format("%d pawn shop(s) found", total))
-        notify(string.format("Auto Farm: %d pawn shop(s) found from the building list.", total), 6)
+        notify(string.format(
+            "Auto Farm: %d pawn shop(s): %s%s",
+            total,
+            table.concat(names, ", "),
+            total > 6 and ", ..." or ""
+        ), 8)
     end
 
     local position = 0
@@ -2996,13 +3081,20 @@ function farm:RunPawnSweep(token)
         self.SweepIndex = position
         self:SetPhase("Shops", string.format("Shop %d/%d - %s", position, total, shop.Name))
 
-        local ready, character = self:GetCharacterReady()
+          local ready, character = self:GetCharacterReady()
 
-        if not ready then
-            self.LastError = "Character is not ready"
-            skipped += 1
-            continue
-        end
+          if not ready then
+              self.LastError = "Character is not ready"
+              skipped += 1
+              continue
+          end
+
+          if not shop.Anchor then
+              self.LastError = "No anchor for " .. shop.Name
+              skipped += 1
+              continue
+          end
+
 
         -- Teleport first, then confirm. A PawnCounter only exists client side once
         -- its area has streamed in, so the tag cannot be read before we arrive.
