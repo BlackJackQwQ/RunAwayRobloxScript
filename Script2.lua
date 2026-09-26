@@ -2324,7 +2324,7 @@ print("[Script2] window created")
 -- Paste a public URL for THIS script below to enable it.
 -- "--" disables re-queue cleanly and reports
 -- "Teleport loader is not configured".
-local AUTO_FARM_LOADER = "https://raw.githubusercontent.com/BlackJackQwQ/RunAwayRobloxScript/refs/heads/main/Script2.lua?cb=11"
+local AUTO_FARM_LOADER = "https://raw.githubusercontent.com/BlackJackQwQ/RunAwayRobloxScript/refs/heads/main/Script2.lua?cb=13"
 
 local farm = {
     Version = 1,
@@ -2339,6 +2339,7 @@ local farm = {
     TeleportLoader = AUTO_FARM_LOADER,
     Running = false,
     ResumeRequested = false,
+    AutoEnabled = false,
     Token = nil,
     QueueJob = nil,
     Revision = 0,
@@ -2502,15 +2503,19 @@ function farm:GetPawnShopEntries()
         return entries
     end
 
-    -- Every building is a candidate, not a guess: a pawn shop can only be
-    -- confirmed once we are standing there, because CollectionService only
-    -- reports PawnCounter instances that have streamed in.
+    -- The building list the teleport system already builds contains every pawn
+    -- shop regardless of distance, alongside whatever ordinary buildings are
+    -- currently loaded. Take the pawn shops straight out of that data instead of
+    -- walking every building to find out what it is.
     local generated = 0
 
     for _, building in buildings:GetChildren() do
         generated += 1
 
-        if building:IsA("Model") and not building.Name:lower():find("sign", 1, true) then
+        if building:IsA("Model")
+            and not building.Name:lower():find("sign", 1, true)
+            and isPawnNamed(building.Name)
+        then
             local surface = teleports:GetBuildingSurface(building)
 
             if surface then
@@ -2522,7 +2527,7 @@ function farm:GetPawnShopEntries()
                     Anchor = surface.Position + Vector3.new(0, 3, 0),
                     Order = attributeId or 1000000000 + generated,
                     Name = building.Name,
-                    Named = isPawnNamed(building.Name),
+                    Named = true,
                 }
             end
         end
@@ -2933,12 +2938,12 @@ function farm:RunPawnSweep(token)
     local total = #queue
 
     if total == 0 then
-        self.LastError = "No buildings were found to sweep"
-        self:SetPhase("Shops", "No buildings found")
-        notify("Auto Farm: no buildings were found to sweep.", 8)
+        self.LastError = "No pawn shop was found in the building list"
+        self:SetPhase("Shops", "No pawn shop found")
+        notify("Auto Farm: no pawn shop was found in the building list.", 8)
     else
-        self:SetPhase("Shops", string.format("%d building(s) to check", total))
-        notify(string.format("Auto Farm: checking %d building(s) for a pawn shop.", total), 6)
+        self:SetPhase("Shops", string.format("%d pawn shop(s) found", total))
+        notify(string.format("Auto Farm: %d pawn shop(s) found from the building list.", total), 6)
     end
 
     local position = 0
@@ -3007,16 +3012,20 @@ function farm:RunPawnSweep(token)
             continue
         end
 
-        local counter = self:WaitForPawnCounter(shop.Anchor, shopRadius, shop.Named and 10 or 6, shop.Name)
-
-        if not counter then
-            skipped += 1
-            continue
-        end
+        -- The building data already identified this as a pawn shop, so a missing
+        -- counter must never skip it: confirm quickly for the status line only,
+        -- then always loot and sell.
+        local counter = self:WaitForPawnCounter(shop.Anchor, shopRadius, 4, shop.Name)
 
         self.Stats.Shops += 1
         farms += 1
-        self:SetPhase("Shops", string.format("Shop %d/%d - %s (pawn shop)", position, total, shop.Name))
+        self:SetPhase("Shops", string.format(
+            "Shop %d/%d - %s%s",
+            position,
+            total,
+            shop.Name,
+            counter and "" or " (no counter tag)"
+        ))
 
         -- the pawn NPC only drives facing and the kill aura, so it is optional
         local pawn = self:WaitForPawn(shop.Anchor, shopRadius, 4, shop.Name)
@@ -3038,8 +3047,8 @@ function farm:RunPawnSweep(token)
     self.SweepDone = true
     self.Sweeping = false
     self:RestoreAssistState()
-    self:SetPhase("Shops", string.format("Farmed %d pawn shop(s), %d building(s) had none", farms, skipped))
-    notify(string.format("Auto Farm: farmed %d pawn shop(s); %d building(s) had no counter.", farms, skipped), 6)
+    self:SetPhase("Shops", string.format("Farmed %d of %d pawn shop(s)", farms, total))
+    notify(string.format("Auto Farm: farmed %d of %d pawn shop(s).", farms, total), 6)
 
     return true
 end
@@ -3406,6 +3415,7 @@ function farm:GetSnapshot()
         Revision = self.Revision,
         UserId = player.UserId,
         Enabled = self.Running,
+        AutoEnabled = self.AutoEnabled,
         SessionId = self.SessionId,
         TransitionToken = self.TransitionToken,
         ExpectedPlaceId = self.ExpectedPlaceId,
@@ -3507,6 +3517,7 @@ function farm:ApplySnapshot(snapshot)
     end
 
     self.SessionId = tostring(snapshot.SessionId or "")
+    self.AutoEnabled = snapshot.AutoEnabled == true
     self.TransitionToken = tostring(snapshot.TransitionToken or "")
     self.ExpectedPlaceId = tonumber(snapshot.ExpectedPlaceId) or 0
     self.TransitionAt = tonumber(snapshot.TransitionAt) or 0
@@ -3670,8 +3681,17 @@ function farm:LoadState()
         return
     end
 
+    local autoIntent = false
+
     if preferenceBest then
         self:ApplyPreferences(preferenceBest)
+
+        -- Standing intent, independent of the live session: if the user left Auto
+        -- Farm switched on, start again on this server even when the transition
+        -- token chain did not survive the requeue.
+        autoIntent = preferenceBest.AutoEnabled == true
+            and (game.PlaceId == farm.LobbyPlaceId or game.PlaceId == farm.GamePlaceId)
+            and os.time() - (tonumber(preferenceBest.UpdatedAt) or 0) <= 900
     end
 
     self.ResumeRequested = false
@@ -3697,6 +3717,12 @@ function farm:LoadState()
 
     for name in self.Stats do
         self.Stats[name] = 0
+    end
+
+    if autoIntent then
+        self.AutoEnabled = true
+        self.ResumeRequested = true
+        self.QueueStatus = "Auto-started from saved config"
     end
 end
 
@@ -5935,7 +5961,9 @@ function farm:Start()
         return
     end
 
-    local resumed = self.ResumeRequested
+    -- a resume only counts when a real session was carried across; otherwise this
+    -- is a fresh start driven by the saved "leave it on" intent
+    local resumed = self.ResumeRequested and self.SessionId ~= ""
 
     if not resumed then
         self.SessionId = tostring(player.UserId) .. "-" .. tostring(os.time()) .. "-" .. tostring(math.random(100000, 999999))
@@ -5944,6 +5972,7 @@ function farm:Start()
         self.StartedAt = os.time()
     end
 
+    self.AutoEnabled = true
     self.ResumeRequested = false
     self.Running = true
     self.RunActive = false
@@ -6063,6 +6092,7 @@ function farm:Stop(silent)
 
     self.Running = false
     self.ResumeRequested = false
+    self.AutoEnabled = false
     self.Token = nil
     self.RunActive = false
     self.ActiveRunToken = nil
