@@ -2324,7 +2324,7 @@ print("[Script2] window created")
 -- Paste a public URL for THIS script below to enable it.
 -- "--" disables re-queue cleanly and reports
 -- "Teleport loader is not configured".
-local AUTO_FARM_LOADER = "https://raw.githubusercontent.com/BlackJackQwQ/RunAwayRobloxScript/refs/heads/main/Script2.lua?cb=21"
+local AUTO_FARM_LOADER = "https://raw.githubusercontent.com/BlackJackQwQ/RunAwayRobloxScript/refs/heads/main/Script2.lua?cb=23"
 
 local farm = {
     Version = 1,
@@ -2408,6 +2408,7 @@ local farm = {
         ShopRadius = 160,
         ShopBudget = 45,
         ShopAttempts = 3,
+        PawnStandOffset = 2.5,
         SweepTimeout = 900,
         SafeGateWait = true,
         AutoStart = true,
@@ -2736,7 +2737,33 @@ function farm:FaceClosestPawn(maxDistance)
     return npc
 end
 
-function farm:StandOnPawn(pawn, character)
+-- Copy the NPC's own orientation instead of looking at it: lookAt would point the
+-- player back at the pawn, which is 180 degrees off the direction the pawn faces.
+function farm:FacePawnDirection(pawn)
+    local character = player.Character
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+
+    if not character or not root or not pawn or not pawn.Parent then
+        return false
+    end
+
+    local body = pawn:FindFirstChild("HumanoidRootPart") or pawn:FindFirstChild("Head") or pawn
+
+    if not body or not body.Parent then
+        return false
+    end
+
+    local bodyFrame = body.CFrame
+    local rotation = bodyFrame - bodyFrame.Position
+
+    character:PivotTo(CFrame.new(root.Position) * rotation)
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
+
+    return true
+end
+
+function farm:AlignToPawn(pawn, character)
     character = character or player.Character
     local root = character and character:FindFirstChild("HumanoidRootPart")
 
@@ -2744,15 +2771,23 @@ function farm:StandOnPawn(pawn, character)
         return false
     end
 
-    -- stand on the pawn's head so the aura and the loot prompt are both in range
-    local target = pawn:FindFirstChild("Head") or pawn:FindFirstChild("HumanoidRootPart") or pawn
+    -- the body drives the direction, the head only supplies the height to stand at
+    local body = pawn:FindFirstChild("HumanoidRootPart") or pawn:FindFirstChild("Head") or pawn
 
-    if not target or not target.Parent then
+    if not body or not body.Parent then
         return false
     end
 
-    local standing = target.CFrame * CFrame.new(0, 0, -2.5)
-    character:PivotTo(standing)
+    local head = pawn:FindFirstChild("Head")
+    local bodyFrame = body.CFrame
+    local rotation = bodyFrame - bodyFrame.Position
+    local standAt = (head and head.Position or bodyFrame.Position) + Vector3.new(0, 1.5, 0)
+    local backOffset = tonumber(self.Config.PawnStandOffset) or 2.5
+
+    -- stand at the pawn's head, pushed behind it, facing exactly where it faces
+    local destination = CFrame.new(standAt - bodyFrame.LookVector * backOffset) * rotation
+
+    character:PivotTo(destination)
     root.AssemblyLinearVelocity = Vector3.zero
     root.AssemblyAngularVelocity = Vector3.zero
 
@@ -3176,17 +3211,26 @@ function farm:RunPawnSweep(token)
             counter and "" or " (no counter tag)"
         ))
 
-        -- the pawn NPC only drives standing position and the kill aura, so it is optional
+        -- the pawn NPC drives standing position, facing and the kill aura
         local pawn = self:WaitForPawn(shop.Anchor, shopRadius, 4, shop.Name)
+        local auraReady = false
 
         if pawn then
-            -- turn to face the pawn first, then hop onto its head
-            self:FaceClosestPawn(shopRadius)
+            -- copy the pawn's own look direction, then stand at its head
+            self:FacePawnDirection(pawn)
             task.wait(0.2)
-            self:StandOnPawn(pawn, character)
+
+            -- the aura stays off unless we really ended up on the pawn facing its way
+            auraReady = self:AlignToPawn(pawn, character) == true
+        else
+            -- no pawn here yet: give the area a moment before running the aura anyway
+            task.wait(3)
+            auraReady = true
         end
 
-        self:SetKillAura(true, true)
+        if auraReady then
+            self:SetKillAura(true, true)
+        end
 
         local outcome = self:WaitShopLoot(token, shop)
 
@@ -3686,6 +3730,10 @@ function farm:ApplyPreferences(snapshot)
               self.Config.AutoStartDelay = tonumber(snapshot.Config.AutoStartDelay)
           end
 
+          if tonumber(snapshot.Config.PawnStandOffset) then
+              self.Config.PawnStandOffset = tonumber(snapshot.Config.PawnStandOffset)
+          end
+
           if type(snapshot.Config.ForceAssist) == "boolean" then
               self.Config.ForceAssist = snapshot.Config.ForceAssist
           end
@@ -3936,6 +3984,10 @@ function farm:ApplyStoredOptions()
 
     if options.RunawaysAutoFarmAutoStartDelay then
         options.RunawaysAutoFarmAutoStartDelay:SetValue(self.Config.AutoStartDelay)
+    end
+
+    if options.RunawaysAutoFarmPawnStandOffset then
+        options.RunawaysAutoFarmPawnStandOffset:SetValue(self.Config.PawnStandOffset)
     end
 
     if toggles.RunawaysAutoFarmForceAssist then
@@ -6589,6 +6641,17 @@ farmBox:AddSlider("RunawaysAutoFarmAutoStartDelay", {
     Default = farm.Config.AutoStartDelay,
     Callback = function(value)
         farm.Config.AutoStartDelay = value
+    end,
+})
+
+farmBox:AddSlider("RunawaysAutoFarmPawnStandOffset", {
+    Text = "Pawn Stand Offset",
+    Min = 0,
+    Max = 10,
+    Step = 0.5,
+    Default = farm.Config.PawnStandOffset,
+    Callback = function(value)
+        farm.Config.PawnStandOffset = value
     end,
 })
 
