@@ -2324,11 +2324,12 @@ print("[Script2] window created")
 -- Paste a public URL for THIS script below to enable it.
 -- "--" disables re-queue cleanly and reports
 -- "Teleport loader is not configured".
-local AUTO_FARM_LOADER = "https://raw.githubusercontent.com/BlackJackQwQ/RunAwayRobloxScript/refs/heads/main/Script2.lua?cb=4"
+local AUTO_FARM_LOADER = "https://raw.githubusercontent.com/BlackJackQwQ/RunAwayRobloxScript/refs/heads/main/Script2.lua?cb=6"
 
 local farm = {
     Version = 1,
     StatsVersion = 2,
+    ConfigVersion = 2,
     LobbyPlaceId = 118418618261207,
     GamePlaceId = 117311404196294,
     StateKey = "RUNAWAYS2_AUTO_FARM_STATE",
@@ -2505,16 +2506,14 @@ function farm:GetPawnShopEntries()
     for _, building in buildings:GetChildren() do
         generated += 1
 
-        if building:IsA("Model")
-            and not building.Name:lower():find("sign", 1, true)
-            and isPawnNamed(building.Name)
-        then
+        if building:IsA("Model") and not building.Name:lower():find("sign", 1, true) then
             local attributeId = tonumber(building:GetAttribute("BuildingId"))
 
             entries[#entries + 1] = {
                 Instance = building,
                 Order = attributeId or 1000000000 + generated,
                 Name = building.Name,
+                Named = isPawnNamed(building.Name),
             }
         end
     end
@@ -2787,32 +2786,45 @@ function farm:RunPawnSweep(token)
     self:SetPhase("Shops", "Scanning pawn shops")
     self:SaveAssistState()
 
-    local entries = self:GetPawnShopEntries()
-    local total = #entries
+    local candidates = self:GetPawnShopEntries()
+    local named = {}
+    local other = {}
 
-    if total == 0 then
-        self.LastError = "No pawn shop buildings were found"
-        self:SetPhase("Shops", "No pawn shops found")
-        notify("Auto Farm: no pawn shop buildings were found.", 8)
-    else
-        local sample = {}
-
-        for i = 1, math.min(3, total) do
-            sample[#sample + 1] = entries[i].Name
+    for _, entry in ipairs(candidates) do
+        if entry.Named then
+            named[#named + 1] = entry
+        else
+            other[#other + 1] = entry
         end
-
-        self:SetPhase("Shops", string.format(
-            "Found %d pawn shop(s): %s%s",
-            total,
-            table.concat(sample, ", "),
-            total > 3 and ", ..." or ""
-        ))
-        notify(string.format("Auto Farm: found %d pawn shop(s).", total), 6)
     end
 
-    local index = 0
-    local visited = 0
+    -- pawn-named buildings first, then everything else, so a shop with an unexpected
+    -- name is still reached. Order is kept and each building is probed only once.
+    local queue = {}
+
+    for _, entry in ipairs(named) do
+        queue[#queue + 1] = entry
+    end
+
+    for _, entry in ipairs(other) do
+        queue[#queue + 1] = entry
+    end
+
+    local total = #queue
+
+    if total == 0 then
+        self.LastError = "No buildings were found to sweep"
+        self:SetPhase("Shops", "No buildings found")
+        notify("Auto Farm: no buildings were found to sweep.", 8)
+    else
+        self:SetPhase("Shops", string.format("%d building(s), %d named as pawn shops", total, #named))
+        notify(string.format("Auto Farm: %d building(s), %d named as pawn shops.", total, #named), 6)
+    end
+
+    local position = 0
+    local farms = 0
     local skipped = 0
+    local processed = {}
     local shopRadius = tonumber(self.Config.ShopRadius) or 160
     local sweepTimeout = tonumber(self.Config.SweepTimeout) or 900
     local overallDeadline = os.clock() + math.max(60, sweepTimeout)
@@ -2828,59 +2840,54 @@ function farm:RunPawnSweep(token)
             break
         end
 
-        local shop
+        position += 1
 
-        -- lowest building index strictly greater than the last one we used
-        for _, entry in entries do
-            if entry.Order > index then
-                shop = entry
-                break
-            end
-        end
+        local shop = queue[position]
 
         if not shop then
             break
         end
 
-        index = shop.Order
-        self.SweepIndex = index
-        self.Stats.Shops += 1
-        visited += 1
-        self:SetPhase("Shops", string.format("Shop %d/%d - %s", visited, total, shop.Name))
+        if processed[shop.Order] then
+            continue
+        end
+
+        processed[shop.Order] = true
+        self.SweepIndex = position
+        self:SetPhase("Shops", string.format("Building %d/%d - %s", position, total, shop.Name))
 
         local surface = teleports:GetBuildingSurface(shop.Instance)
 
         if not surface then
-            self.LastError = "No walkable surface at " .. shop.Name
             skipped += 1
             continue
         end
 
         local anchor = surface.Position + Vector3.new(0, 3, 0)
 
-        -- a shop only counts once a pawn NPC has actually streamed in nearby
-        local pawn = self:WaitForPawn(anchor, shopRadius, nil, shop.Name)
+        -- a building only counts once a pawn NPC has actually streamed in nearby
+        local pawn = self:WaitForPawn(anchor, shopRadius, shop.Named and 10 or 5, shop.Name)
 
         if not pawn then
-            self.LastError = "No pawn NPC near " .. shop.Name
             skipped += 1
             continue
         end
 
-        local ready, character, root = self:GetCharacterReady()
+        local ready, character = self:GetCharacterReady()
 
         if not ready then
             self.LastError = "Character is not ready"
-            skipped += 1
             task.wait(1)
             continue
         end
 
         if not teleports:Move(CFrame.new(anchor), character) then
             self.LastError = "Could not reach " .. shop.Name
-            skipped += 1
             continue
         end
+
+        self.Stats.Shops += 1
+        farms += 1
 
         -- kill aura off, face the closest pawn, then kill aura on at max range
         self:SetKillAura(false)
@@ -2897,7 +2904,8 @@ function farm:RunPawnSweep(token)
 
     self.SweepDone = true
     self:RestoreAssistState()
-    self:SetPhase("Shops", string.format("Swept %d of %d pawn shop(s), skipped %d", visited, total, skipped))
+    self:SetPhase("Shops", string.format("Farmed %d pawn shop(s), skipped %d of %d building(s)", farms, skipped, total))
+    notify(string.format("Auto Farm: farmed %d pawn shop(s), skipped %d building(s).", farms, skipped), 6)
 
     return true
 end
@@ -3260,6 +3268,7 @@ function farm:GetSnapshot()
     return {
         Version = self.Version,
         StatsVersion = self.StatsVersion,
+        ConfigVersion = self.ConfigVersion,
         Revision = self.Revision,
         UserId = player.UserId,
         Enabled = self.Running,
@@ -3342,6 +3351,12 @@ function farm:ApplyPreferences(snapshot)
 
         if type(snapshot.Config.AutoReplay) == "boolean" then
             self.Config.AutoReplay = snapshot.Config.AutoReplay
+        end
+
+        -- one time migration: snapshots written before the requeue default flipped
+        -- to a new match would otherwise pin Auto Replay off forever
+        if (tonumber(snapshot.ConfigVersion) or 1) < self.ConfigVersion then
+            self.Config.AutoReplay = true
         end
 
         if type(snapshot.Config.ForceAssist) == "boolean" then
@@ -5620,12 +5635,13 @@ function farm:RunGame(token)
     self.PendingAt = os.time()
     self:Persist()
 
-    local autoReplay = self:IsAutoReplayEnabled()
-    local nextPlaceId = autoReplay and self.GamePlaceId or self.LobbyPlaceId
+    -- crossing the finish always requeues into a new match; the lobby is never
+    -- the destination here, so this cannot be steered by a stale saved toggle
+    local nextPlaceId = self.GamePlaceId
 
-    self:SetPhase("Requeueing", autoReplay and "Queuing a new match" or "Queuing the lobby")
+    self:SetPhase("Requeueing", "Queuing a new match")
 
-    local queued, queueError = self:QueueTeleport(autoReplay and "replay" or "lobby", nextPlaceId)
+    local queued, queueError = self:QueueTeleport("replay", nextPlaceId)
 
     if not queued then
         self.PendingFinish = false
