@@ -2324,7 +2324,7 @@ print("[Script2] window created")
 -- Paste a public URL for THIS script below to enable it.
 -- "--" disables re-queue cleanly and reports
 -- "Teleport loader is not configured".
-local AUTO_FARM_LOADER = "https://raw.githubusercontent.com/BlackJackQwQ/RunAwayRobloxScript/refs/heads/main/Script2.lua?cb=8"
+local AUTO_FARM_LOADER = "https://raw.githubusercontent.com/BlackJackQwQ/RunAwayRobloxScript/refs/heads/main/Script2.lua?cb=10"
 
 local farm = {
     Version = 1,
@@ -2495,37 +2495,58 @@ end
 
 function farm:GetPawnShopEntries()
     local entries = {}
+    local seen = {}
+
+    -- Pawn shops are tagged "PawnCounter" in the workspace. That is the same
+    -- marker the sell routine and the original building teleport rely on, so it
+    -- identifies every shop exactly instead of guessing from names or NPCs.
+    local tagged = CollectionService:GetTagged("PawnCounter")
     local map = workspace:FindFirstChild("Map")
     local buildings = map and map:FindFirstChild("Buildings")
 
-    if not buildings then
-        return entries
-    end
+    for _, counter in ipairs(tagged) do
+        if counter and not seen[counter] then
+            seen[counter] = true
 
-    local generated = 0
+            local volume = counter:FindFirstChild("Volume", true)
+            local reference = volume or (counter:IsA("BasePart") and counter or nil)
+            local referencePosition = reference and reference.Position or nil
 
-    for _, building in buildings:GetChildren() do
-        generated += 1
+            if referencePosition then
+                -- stand on the walkable surface closest to the counter so the
+                -- player arrives on the road with the counter in interaction range
+                local bestSurface
+                local bestDistance = math.huge
 
-        if building:IsA("Model") and not building.Name:lower():find("sign", 1, true) then
-            local attributeId = tonumber(building:GetAttribute("BuildingId"))
+                if buildings then
+                    for _, building in buildings:GetChildren() do
+                        if building:IsA("Model") then
+                            local surface = teleports:GetBuildingSurface(building)
 
-            entries[#entries + 1] = {
-                Instance = building,
-                Order = attributeId or 1000000000 + generated,
-                Name = building.Name,
-                Named = isPawnNamed(building.Name),
-            }
+                            if surface then
+                                local distance = (surface.Position - referencePosition).Magnitude
+
+                                if distance < bestDistance then
+                                    bestDistance = distance
+                                    bestSurface = surface
+                                end
+                            end
+                        end
+                    end
+                end
+
+                entries[#entries + 1] = {
+                    Instance = counter,
+                    Surface = bestSurface,
+                    Anchor = (bestSurface and bestSurface.Position or referencePosition) + Vector3.new(0, 3, 0),
+                    Distance = bestDistance,
+                    Name = formatName(counter.Name),
+                    Order = #entries + 1,
+                    Named = true,
+                }
+            end
         end
     end
-
-    table.sort(entries, function(a, b)
-        if a.Order == b.Order then
-            return a.Name < b.Name
-        end
-
-        return a.Order < b.Order
-    end)
 
     return entries
 end
@@ -2876,39 +2897,16 @@ function farm:RunPawnSweep(token)
     self:SetPhase("Shops", "Scanning pawn shops")
     self:SaveAssistState()
 
-    local candidates = self:GetPawnShopEntries()
-    local named = {}
-    local other = {}
-
-    for _, entry in ipairs(candidates) do
-        if entry.Named then
-            named[#named + 1] = entry
-        else
-            other[#other + 1] = entry
-        end
-    end
-
-    -- pawn-named buildings first, then everything else, so a shop with an unexpected
-    -- name is still reached. Order is kept and each building is probed only once.
-    local queue = {}
-
-    for _, entry in ipairs(named) do
-        queue[#queue + 1] = entry
-    end
-
-    for _, entry in ipairs(other) do
-        queue[#queue + 1] = entry
-    end
-
+    local queue = self:GetPawnShopEntries()
     local total = #queue
 
     if total == 0 then
-        self.LastError = "No buildings were found to sweep"
-        self:SetPhase("Shops", "No buildings found")
-        notify("Auto Farm: no buildings were found to sweep.", 8)
+        self.LastError = "No PawnCounter was tagged in this server"
+        self:SetPhase("Shops", "No pawn shop found")
+        notify("Auto Farm: no PawnCounter was tagged, so no pawn shop could be located.", 8)
     else
-        self:SetPhase("Shops", string.format("%d building(s), %d named as pawn shops", total, #named))
-        notify(string.format("Auto Farm: %d building(s), %d named as pawn shops.", total, #named), 6)
+        self:SetPhase("Shops", string.format("%d pawn shop(s) found", total))
+        notify(string.format("Auto Farm: %d pawn shop(s) found via PawnCounter tags.", total), 6)
     end
 
     local position = 0
@@ -2931,10 +2929,10 @@ function farm:RunPawnSweep(token)
             break
         end
 
-        -- never let a single building wedge the whole sweep without a trace
+        -- never let a single shop wedge the whole sweep without a trace
         if os.clock() - lastProgressAt > 150 then
             self.LastError = string.format(
-                "Pawn sweep stalled on building %d/%d - %s",
+                "Pawn sweep stalled on shop %d/%d - %s",
                 position + 1,
                 total,
                 queue[position + 1] and queue[position + 1].Name or "?"
@@ -2959,46 +2957,40 @@ function farm:RunPawnSweep(token)
         processed[shop.Order] = true
         lastProgressAt = os.clock()
         self.SweepIndex = position
-        self:SetPhase("Shops", string.format("Building %d/%d - %s", position, total, shop.Name))
-
-        local surface = teleports:GetBuildingSurface(shop.Instance)
-
-        if not surface then
-            skipped += 1
-            continue
-        end
-
-        local anchor = surface.Position + Vector3.new(0, 3, 0)
-
-        -- a building only counts once a pawn NPC has actually streamed in nearby
-        local pawn = self:WaitForPawn(anchor, shopRadius, shop.Named and 10 or 5, shop.Name)
-
-        if not pawn then
-            skipped += 1
-            continue
-        end
+        self:SetPhase("Shops", string.format("Shop %d/%d - %s", position, total, shop.Name))
 
         local ready, character = self:GetCharacterReady()
 
         if not ready then
             self.LastError = "Character is not ready"
-            task.wait(1)
+            skipped += 1
             continue
         end
 
-        if not teleports:Move(CFrame.new(anchor), character) then
+        -- The anchor is already resolved to the walkable surface nearest the
+        -- tagged counter, so this lands on the shop directly.
+        if not teleports:Move(CFrame.new(shop.Anchor), character) then
             self.LastError = "Could not reach " .. shop.Name
+            skipped += 1
             continue
+        end
+
+        teleports:Stream(shop.Anchor)
+
+        -- The counter tag is the authority on "this is a pawn shop". The pawn NPC
+        -- is only wanted for facing and the kill aura, so a missing one is not
+        -- treated as a reason to skip: looting and selling both work without it.
+        local pawn = self:WaitForPawn(shop.Anchor, shopRadius, 6, shop.Name)
+
+        if pawn then
+            self:SetKillAura(false)
+            task.wait(0.2)
+            self:FaceClosestPawn(shopRadius)
+            self:SetKillAura(true, true)
         end
 
         self.Stats.Shops += 1
         farms += 1
-
-        -- kill aura off, face the closest pawn, then kill aura on at max range
-        self:SetKillAura(false)
-        task.wait(0.2)
-        self:FaceClosestPawn(shopRadius)
-        self:SetKillAura(true, true)
 
         self:WaitShopLoot(token, shop)
 
@@ -3010,8 +3002,8 @@ function farm:RunPawnSweep(token)
     self.SweepDone = true
     self.Sweeping = false
     self:RestoreAssistState()
-    self:SetPhase("Shops", string.format("Farmed %d pawn shop(s), skipped %d of %d building(s)", farms, skipped, total))
-    notify(string.format("Auto Farm: farmed %d pawn shop(s), skipped %d building(s).", farms, skipped), 6)
+    self:SetPhase("Shops", string.format("Farmed %d of %d pawn shop(s)", farms, total))
+    notify(string.format("Auto Farm: farmed %d of %d pawn shop(s).", farms, total), 6)
 
     return true
 end
