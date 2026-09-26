@@ -1645,14 +1645,14 @@ local function sellAllLoot(onDone)
                             break
                         end
 
-                        deadline = os.clock() + 1.5
+                        local batchDeadline = os.clock() + 1.5
 
                         repeat
                             task.wait(0.03)
                             currentCash = getCashAmount()
                         until prompt.Enabled
                             or batchCash and currentCash and currentCash - batchCash >= batchValue
-                            or os.clock() >= deadline
+                            or os.clock() >= batchDeadline
 
                         if batchCash and currentCash and currentCash - batchCash >= batchValue then
                             soldInBatch = deposited
@@ -1675,13 +1675,13 @@ local function sellAllLoot(onDone)
 
                         local confirmed = false
 
-                        deadline = os.clock() + 1.5
+                        local confirmDeadline = os.clock() + 1.5
 
                         repeat
                             task.wait(0.05)
                             currentCash = getCashAmount()
                             confirmed = not prompt.Enabled or clickCash and currentCash and currentCash > clickCash
-                        until confirmed or os.clock() >= deadline
+                        until confirmed or os.clock() >= confirmDeadline
 
                         if not confirmed then
                             break
@@ -2684,13 +2684,13 @@ function farm:WaitShopLoot(token, shop)
             lootDone = true
         end)
 
-        local deadline = os.clock() + 180
+        local lootDeadline = os.clock() + 180
 
         while not lootDone
             and self.Running
             and self.Token == token
             and not library.Unloaded
-            and os.clock() < deadline
+            and os.clock() < lootDeadline
         do
             task.wait(0.1)
         end
@@ -2748,13 +2748,13 @@ function farm:WaitShopLoot(token, shop)
                 sellDone = true
             end)
 
-            deadline = os.clock() + 180
+            local sellDeadline = os.clock() + 180
 
             while not sellDone
                 and self.Running
                 and self.Token == token
                 and not library.Unloaded
-                and os.clock() < deadline
+                and os.clock() < sellDeadline
             do
                 task.wait(0.1)
             end
@@ -2843,13 +2843,13 @@ function farm:WaitShopLoot(token, shop)
                 sold = true
             end)
 
-            deadline = os.clock() + 180
+            local confirmSellDeadline = os.clock() + 180
 
             while not sold
                 and self.Running
                 and self.Token == token
                 and not library.Unloaded
-                and os.clock() < deadline
+                and os.clock() < confirmSellDeadline
             do
                 task.wait(0.1)
             end
