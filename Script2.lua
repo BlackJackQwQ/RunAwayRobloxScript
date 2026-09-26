@@ -2324,7 +2324,7 @@ print("[Script2] window created")
 -- Paste a public URL for THIS script below to enable it.
 -- "--" disables re-queue cleanly and reports
 -- "Teleport loader is not configured".
-local AUTO_FARM_LOADER = "https://raw.githubusercontent.com/BlackJackQwQ/RunAwayRobloxScript/refs/heads/main/Script2.lua?cb=7"
+local AUTO_FARM_LOADER = "https://raw.githubusercontent.com/BlackJackQwQ/RunAwayRobloxScript/refs/heads/main/Script2.lua?cb=8"
 
 local farm = {
     Version = 1,
@@ -2391,6 +2391,7 @@ local farm = {
     TeleportRetryTarget = 0,
     TeleportRetryOptions = nil,
     TeleportRecovering = false,
+    Sweeping = false,
     LastTeleportFailureAt = 0,
     Labels = {},
     LabelCache = {},
@@ -2779,10 +2780,99 @@ function farm:WaitShopLoot(token, shop)
         end
     end
 
+    -- Confirming Loot All. This used to happen only as a side effect of the next
+    -- loop iteration, so a small ShopRounds budget exited before the shop ever
+    -- reported "nothing to loot" and loot could be left on the ground.
+    for confirm = 1, 2 do
+        if not self.Running or self.Token ~= token or library.Unloaded then
+            return true
+        end
+
+        if os.clock() >= shopDeadline then
+            self.LastError = "Shop budget spent at " .. shop.Name
+            return true
+        end
+
+        self:SetPhase("Looting", shop.Name)
+
+        local confirmDone, confirmResult = false, nil
+
+        collect(function(result)
+            confirmResult = result
+            confirmDone = true
+        end)
+
+        local confirmDeadline = os.clock() + 20
+
+        while not confirmDone
+            and self.Running
+            and self.Token == token
+            and not library.Unloaded
+            and os.clock() < confirmDeadline
+        do
+            task.wait(0.1)
+        end
+
+        if not confirmResult or confirmResult.ok ~= true then
+            return true
+        end
+
+        self.Stats.Looted += tonumber(confirmResult.looted) or 0
+
+        -- the shop is genuinely empty, so the sweep can move on
+        if confirmResult.nothing or (tonumber(confirmResult.looted) or 0) <= 0 then
+            return true
+        end
+
+        -- something was still on the ground: sell it off, then confirm once more
+        local confirmPasses = 0
+
+        while self.Running and self.Token == token and not library.Unloaded do
+            confirmPasses += 1
+
+            if confirmPasses > sellRounds then
+                break
+            end
+
+            self:SetPhase("Selling", shop.Name)
+
+            local sold, sellResult = false, nil
+
+            sellAllLoot(function(result)
+                sellResult = result
+                sold = true
+            end)
+
+            deadline = os.clock() + 180
+
+            while not sold
+                and self.Running
+                and self.Token == token
+                and not library.Unloaded
+                and os.clock() < deadline
+            do
+                task.wait(0.1)
+            end
+
+            if not sellResult or sellResult.ok ~= true then
+                break
+            end
+
+            self.Stats.Sold += tonumber(sellResult.sold) or 0
+
+            if sellResult.nothing then
+                break
+            end
+
+            task.wait(0.3)
+        end
+    end
+
     return true
 end
 
 function farm:RunPawnSweep(token)
+    self.Sweeping = true
     self:SetPhase("Shops", "Scanning pawn shops")
     self:SaveAssistState()
 
@@ -2918,6 +3008,7 @@ function farm:RunPawnSweep(token)
     end
 
     self.SweepDone = true
+    self.Sweeping = false
     self:RestoreAssistState()
     self:SetPhase("Shops", string.format("Farmed %d pawn shop(s), skipped %d of %d building(s)", farms, skipped, total))
     notify(string.format("Auto Farm: farmed %d pawn shop(s), skipped %d building(s).", farms, skipped), 6)
@@ -4076,8 +4167,8 @@ function farm:GetEndScreen()
             if instance:IsA("GuiObject") and visible(instance) then
                 local name = instance.Name:lower()
                 local text = (instance:IsA("TextLabel") or instance:IsA("TextButton")) and instance.Text:lower() or ""
-                local isCaptured = name:find("captured", 1, true) ~= nil or text:find("captured", 1, true) ~= nil
-                local isEscaped = name:find("escaped", 1, true) ~= nil or text:find("escaped", 1, true) ~= nil
+                local isCaptured = name == "captured" or text == "captured"
+                local isEscaped = name == "escaped" or text == "escaped"
 
                 if isCaptured or isEscaped then
                     return endFrame, isCaptured and "Captured" or "Escaped"
@@ -4094,12 +4185,15 @@ function farm:GetEndScreen()
 
     self.LastEndScreenScanAt = os.clock()
 
+    -- Exact matches only. A substring match across every visible GuiObject used to
+    -- fire on any unrelated label that merely mentioned the word, which made the
+    -- state machine treat a live round as finished and stall before the gate.
     for _, instance in playerGui:GetDescendants() do
         if instance:IsA("GuiObject") and visible(instance) then
             local name = instance.Name:lower()
             local text = (instance:IsA("TextLabel") or instance:IsA("TextButton")) and instance.Text:lower() or ""
-            local isCaptured = name:find("captured", 1, true) ~= nil or text:find("captured", 1, true) ~= nil
-            local isEscaped = name:find("escaped", 1, true) ~= nil or text:find("escaped", 1, true) ~= nil
+            local isCaptured = name == "captured" or text == "captured"
+            local isEscaped = name == "escaped" or text == "escaped"
 
             if isCaptured or isEscaped then
                 return layer(instance) or endFrame, isCaptured and "Captured" or "Escaped"
@@ -5897,7 +5991,10 @@ function farm:Start()
                     end
                 end
 
-                self.Stats.NPCAttacks += killAllNPCs()
+                -- never wipe NPCs while sweeping: the pawns are the loot source
+                if not self.Sweeping then
+                    self.Stats.NPCAttacks += killAllNPCs()
+                end
             end
 
             task.wait(context == "Game" and 0.4 or 1)
