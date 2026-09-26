@@ -2324,7 +2324,7 @@ print("[Script2] window created")
 -- Paste a public URL for THIS script below to enable it.
 -- "--" disables re-queue cleanly and reports
 -- "Teleport loader is not configured".
-local AUTO_FARM_LOADER = "https://raw.githubusercontent.com/BlackJackQwQ/RunAwayRobloxScript/refs/heads/main/Script2.lua?cb=6"
+local AUTO_FARM_LOADER = "https://raw.githubusercontent.com/BlackJackQwQ/RunAwayRobloxScript/refs/heads/main/Script2.lua?cb=7"
 
 local farm = {
     Version = 1,
@@ -2828,6 +2828,7 @@ function farm:RunPawnSweep(token)
     local shopRadius = tonumber(self.Config.ShopRadius) or 160
     local sweepTimeout = tonumber(self.Config.SweepTimeout) or 900
     local overallDeadline = os.clock() + math.max(60, sweepTimeout)
+    local lastProgressAt = os.clock()
 
     while self.Running and self.Token == token and not library.Unloaded do
         if self.TeleportRecovering then
@@ -2837,6 +2838,19 @@ function farm:RunPawnSweep(token)
 
         if os.clock() >= overallDeadline then
             self.LastError = "Pawn sweep timed out"
+            break
+        end
+
+        -- never let a single building wedge the whole sweep without a trace
+        if os.clock() - lastProgressAt > 150 then
+            self.LastError = string.format(
+                "Pawn sweep stalled on building %d/%d - %s",
+                position + 1,
+                total,
+                queue[position + 1] and queue[position + 1].Name or "?"
+            )
+            self:SetPhase("Shops", self.LastError)
+            notify("Auto Farm: " .. self.LastError .. ". Moving on to the finish.", 10)
             break
         end
 
@@ -2853,6 +2867,7 @@ function farm:RunPawnSweep(token)
         end
 
         processed[shop.Order] = true
+        lastProgressAt = os.clock()
         self.SweepIndex = position
         self:SetPhase("Shops", string.format("Building %d/%d - %s", position, total, shop.Name))
 
@@ -3805,6 +3820,17 @@ end
 
 function farm:StartTeleportRecovery(token)
     if not self.Running or self.Token ~= token or library.Unloaded then
+        return
+    end
+
+    -- recovery used to re-arm itself forever, which left TeleportRecovering true
+    -- and silently wedged every loop in the farm
+    if self.TeleportRetryCount >= 6 then
+        self.TeleportRecovering = false
+        self.Teleporting = false
+        self.LastError = "Teleport recovery gave up after 6 attempts"
+        self:SetPhase("Stopped", self.LastError)
+        self:Stop()
         return
     end
 
