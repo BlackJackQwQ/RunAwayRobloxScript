@@ -2324,7 +2324,7 @@ print("[Script2] window created")
 -- Paste a public URL for THIS script below to enable it.
 -- "--" disables re-queue cleanly and reports
 -- "Teleport loader is not configured".
-local AUTO_FARM_LOADER = "https://raw.githubusercontent.com/BlackJackQwQ/RunAwayRobloxScript/refs/heads/main/Script2.lua?cb=20"
+local AUTO_FARM_LOADER = "https://raw.githubusercontent.com/BlackJackQwQ/RunAwayRobloxScript/refs/heads/main/Script2.lua?cb=21"
 
 local farm = {
     Version = 1,
@@ -2411,6 +2411,7 @@ local farm = {
         SweepTimeout = 900,
         SafeGateWait = true,
         AutoStart = true,
+        AutoStartDelay = 5,
         AutoReplay = true,
         ForceAssist = false,
     },
@@ -3681,6 +3682,10 @@ function farm:ApplyPreferences(snapshot)
               self.Config.AutoStart = snapshot.Config.AutoStart
           end
 
+          if tonumber(snapshot.Config.AutoStartDelay) then
+              self.Config.AutoStartDelay = tonumber(snapshot.Config.AutoStartDelay)
+          end
+
           if type(snapshot.Config.ForceAssist) == "boolean" then
               self.Config.ForceAssist = snapshot.Config.ForceAssist
           end
@@ -3927,6 +3932,10 @@ function farm:ApplyStoredOptions()
 
     if toggles.RunawaysAutoFarmAutoStart then
         toggles.RunawaysAutoFarmAutoStart:SetValue(self.Config.AutoStart)
+    end
+
+    if options.RunawaysAutoFarmAutoStartDelay then
+        options.RunawaysAutoFarmAutoStartDelay:SetValue(self.Config.AutoStartDelay)
     end
 
     if toggles.RunawaysAutoFarmForceAssist then
@@ -6572,6 +6581,17 @@ farmBox:AddToggle("RunawaysAutoFarmAutoStart", {
     end,
 })
 
+farmBox:AddSlider("RunawaysAutoFarmAutoStartDelay", {
+    Text = "Auto Start Delay",
+    Min = 0,
+    Max = 60,
+    Step = 1,
+    Default = farm.Config.AutoStartDelay,
+    Callback = function(value)
+        farm.Config.AutoStartDelay = value
+    end,
+})
+
 farmBox:AddToggle("RunawaysAutoFarmSafeGateWait", {
     Text = "Safe Gate Wait",
     Default = farm.Config.SafeGateWait,
@@ -6839,10 +6859,38 @@ farm:UpdateUI()
 
 if farm.ResumeRequested or (toggles.RunawaysAutoFarm and toggles.RunawaysAutoFarm.Value == true) or farm:IsAutoStartEnabled() then
     farm.ResumeRequested = true
-    farm:Start()
 
-    if farm.Running and toggles.RunawaysAutoFarm and not toggles.RunawaysAutoFarm.Value then
-        toggles.RunawaysAutoFarm:SetValue(true)
+    local function beginFarm()
+        if library.Unloaded then
+            return
+        end
+
+        farm:Start()
+
+        if farm.Running and toggles.RunawaysAutoFarm and not toggles.RunawaysAutoFarm.Value then
+            toggles.RunawaysAutoFarm:SetValue(true)
+        end
+    end
+
+    -- let the place finish loading and the character spawn before the farm starts
+    local autoStartDelay = math.max(0, math.floor(tonumber(farm.Config.AutoStartDelay) or 0))
+
+    if autoStartDelay > 0 then
+        task.spawn(function()
+            for remaining = autoStartDelay, 1, -1 do
+                if library.Unloaded then
+                    return
+                end
+
+                farm:SetPhase("Waiting", string.format("Auto starting in %d s", remaining))
+                farm:UpdateUI()
+                task.wait(1)
+            end
+
+            beginFarm()
+        end)
+    else
+        beginFarm()
     end
 end
 
