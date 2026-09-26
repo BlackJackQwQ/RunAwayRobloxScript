@@ -2324,7 +2324,7 @@ print("[Script2] window created")
 -- Paste a public URL for THIS script below to enable it.
 -- "--" disables re-queue cleanly and reports
 -- "Teleport loader is not configured".
-local AUTO_FARM_LOADER = "https://raw.githubusercontent.com/BlackJackQwQ/RunAwayRobloxScript/refs/heads/main/Script2.lua?cb=2"
+local AUTO_FARM_LOADER = "https://raw.githubusercontent.com/BlackJackQwQ/RunAwayRobloxScript/refs/heads/main/Script2.lua?cb=4"
 
 local farm = {
     Version = 1,
@@ -2406,7 +2406,7 @@ local farm = {
         ShopBudget = 45,
         SweepTimeout = 900,
         SafeGateWait = true,
-        AutoReplay = false,
+        AutoReplay = true,
         ForceAssist = false,
     },
     Stats = {
@@ -2609,6 +2609,29 @@ function farm:GetCharacterReady()
     return character and humanoid and root and humanoid.Health > 0 and not humanoid.SeatPart, character, root
 end
 
+-- streaming brings NPCs in over time, so poll instead of guessing a fixed delay
+function farm:WaitForPawn(origin, maxDistance, timeout, label)
+    local deadline = os.clock() + (tonumber(timeout) or 10)
+
+    while self.Running and not library.Unloaded and os.clock() < deadline do
+        teleports:Stream(origin)
+
+        local pawn, distance = self:GetClosestPawn(origin, maxDistance)
+
+        if pawn then
+            return pawn, distance
+        end
+
+        if label then
+            self:SetPhase("Shops", "Streaming " .. label)
+        end
+
+        task.wait(0.5)
+    end
+
+    return nil
+end
+
 function farm:WaitShopLoot(token, shop)
     local rounds = 0
     local settle = tonumber(self.Config.SettleDelay) or 3
@@ -2789,6 +2812,7 @@ function farm:RunPawnSweep(token)
 
     local index = 0
     local visited = 0
+    local skipped = 0
     local shopRadius = tonumber(self.Config.ShopRadius) or 160
     local sweepTimeout = tonumber(self.Config.SweepTimeout) or 900
     local overallDeadline = os.clock() + math.max(60, sweepTimeout)
@@ -2828,16 +2852,18 @@ function farm:RunPawnSweep(token)
 
         if not surface then
             self.LastError = "No walkable surface at " .. shop.Name
+            skipped += 1
             continue
         end
 
         local anchor = surface.Position + Vector3.new(0, 3, 0)
-        teleports:Stream(anchor)
-        task.wait(0.6)
 
-        -- a shop only counts when a pawn NPC is actually standing there
-        if not self:GetClosestPawn(anchor, shopRadius) then
+        -- a shop only counts once a pawn NPC has actually streamed in nearby
+        local pawn = self:WaitForPawn(anchor, shopRadius, nil, shop.Name)
+
+        if not pawn then
             self.LastError = "No pawn NPC near " .. shop.Name
+            skipped += 1
             continue
         end
 
@@ -2845,12 +2871,14 @@ function farm:RunPawnSweep(token)
 
         if not ready then
             self.LastError = "Character is not ready"
+            skipped += 1
             task.wait(1)
             continue
         end
 
         if not teleports:Move(CFrame.new(anchor), character) then
             self.LastError = "Could not reach " .. shop.Name
+            skipped += 1
             continue
         end
 
@@ -2869,7 +2897,7 @@ function farm:RunPawnSweep(token)
 
     self.SweepDone = true
     self:RestoreAssistState()
-    self:SetPhase("Shops", string.format("Swept %d of %d pawn shop(s)", visited, total))
+    self:SetPhase("Shops", string.format("Swept %d of %d pawn shop(s), skipped %d", visited, total, skipped))
 
     return true
 end
@@ -5594,6 +5622,9 @@ function farm:RunGame(token)
 
     local autoReplay = self:IsAutoReplayEnabled()
     local nextPlaceId = autoReplay and self.GamePlaceId or self.LobbyPlaceId
+
+    self:SetPhase("Requeueing", autoReplay and "Queuing a new match" or "Queuing the lobby")
+
     local queued, queueError = self:QueueTeleport(autoReplay and "replay" or "lobby", nextPlaceId)
 
     if not queued then
